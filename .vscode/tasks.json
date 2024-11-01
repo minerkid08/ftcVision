@@ -1,0 +1,32 @@
+{
+    "tasks": [
+        {
+            "args": [
+                "1",
+                "main\\src",
+                "-o",
+                "${workspaceFolder}\\bin\\main.exe",
+                "-I${workspaceFolder}\\include",
+                "-I${workspaceFolder}\\main\\src",
+                "-L${workspaceFolder}\\bin\\",
+                "-llibopencv_core4100",
+                "-llibopencv_imgcodecs4100",
+                "-llibopencv_highgui4100",
+                "-llibopencv_imgproc4100"
+            ],
+            "command": "D:/cppGames/Build.exe",
+            "group": {
+                "kind": "build"
+            },
+            "label": "main",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [
+                "$gcc"
+            ],
+            "type": "cppbuild"
+        }
+    ],
+    "version": "2.0.0"
+}

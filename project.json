@@ -1,0 +1,14 @@
+{
+	"projects": [
+		{
+			"name": "main",
+			"build": [],
+			"include": ["include"],
+			"type": "exe",
+			"out": "main.exe",
+			"dll": ["libopencv_core4100", "libopencv_imgcodecs4100", "libopencv_highgui4100", "libopencv_imgproc4100"],
+			"sdll": [],
+			"configs": ["build", "run"]
+		}
+	]
+}
