@@ -1,20 +1,5 @@
 #include <opencv2/opencv.hpp>
 
-void process(cv::Mat& mat);
-
-int main(int argc, const char** argv)
-{
-	cv::Mat mat = cv::imread("image2.jpg", cv::IMREAD_COLOR);
-
-	process(mat);
-
-	cv::imwrite("out.jpg", mat);
-
-	cv::imshow("window", mat);
-	cv::waitKey(0);
-	return 0;
-}
-
 struct Vec2
 {
 	int x;
@@ -48,28 +33,94 @@ struct Vec2
 	}
 };
 
+struct Sample
+{
+	Vec2 pos;
+	float rot;
+};
+
+std::vector<Sample> samples;
+
 struct Color
 {
 	unsigned char b;
 	unsigned char g;
 	unsigned char r;
+
+	cv::Vec3b vec() const
+	{
+		return {b, g, r};
+	}
 };
+
+struct SampleDetection
+{
+	Color low;
+	Color hight;
+};
+
+SampleDetection redSampleDetection = {{0, 0, 180}, {160, 120, 255}};
+SampleDetection blueSampleDetection = {{130, 0, 0}, {255, 120, 110}};
+SampleDetection yellowSampleDetection = {{0, 120, 180}, {160, 255, 255}};
+
+void process(cv::Mat& mat, const SampleDetection& detection);
+
+int main(int argc, const char** argv)
+{
+	cv::Mat mat; // = cv::imread("image2.jpg", cv::IMREAD_COLOR);
+
+	cv::VideoCapture c(1, cv::CAP_DSHOW);
+
+	if (!c.isOpened())
+	{
+		std::cerr << "cant open camera";
+		return 0;
+	}
+
+	c.read(mat);
+
+	std::cout << cv::format("width %i, height %i\n", mat.size().width, mat.size().height);
+
+	std::cout << "opened webcam\n";
+
+	while (true)
+	{
+		if (!c.read(mat))
+			break;
+		process(mat, yellowSampleDetection);
+
+		cv::imshow("window", mat);
+		if (cv::waitKey(1) == 'q')
+			break;
+	}
+
+  cv::imwrite("out.jpg", mat);
+
+	return 0;
+}
 
 inline bool checkPixel(const cv::Mat& mat, Vec2 pos, Vec2 offset = {0, 0})
 {
 	return mat.ptr<unsigned char>(pos.y + offset.y)[pos.x + offset.x];
 }
 
-Vec2 traceLine(const cv::Mat& m, Vec2 curPos, const Vec2* offsets, int len, bool strictTracing = true)
+Vec2 traceLine(const cv::Mat& m, Vec2 curPos, const Vec2* offsets, int len, int strictTracingLimit = -1)
 {
-	char e = (strictTracing ? -1 : -2);
+	char e = (strictTracingLimit ? -1 : -2);
+	int traceCount = 0;
 	while (true)
 	{
 		bool set = false;
 		for (int i = 0; i < len; i++)
 		{
 			if (e == i)
-				continue;
+			{
+				if (traceCount > strictTracingLimit)
+					break;
+				traceCount++;
+			}
+			else
+				traceCount = 0;
 			if (checkPixel(m, curPos, offsets[i]))
 			{
 				if (i == 0 && e == -1)
@@ -88,21 +139,59 @@ Vec2 traceLine(const cv::Mat& m, Vec2 curPos, const Vec2* offsets, int len, bool
 	return curPos;
 }
 
-void process(cv::Mat& mat)
+void process(cv::Mat& mat, const SampleDetection& detection)
+{
+	cv::Mat m;
+
+	cv::inRange(mat, detection.low.vec(), detection.hight.vec(), m);
+
+	for (int y = 0; y < m.rows; y++)
+	{
+		for (int x = 0; x < m.cols; x++)
+		{
+			unsigned char c = m.ptr<unsigned char>(y)[x];
+			if (c)
+				mat.ptr<Color>(y)[x] = {c, c, c};
+		}
+	}
+
+	std::vector<std::vector<cv::Point>> countors;
+
+	cv::findContours(m, countors, cv::RetrievalModes::RETR_LIST, cv::ContourApproximationModes::CHAIN_APPROX_NONE);
+
+	if (countors.size() == 0)
+		return;
+
+	samples.clear();
+
+	for (const std::vector<cv::Point>& points2 : countors)
+	{
+		cv::RotatedRect rect = cv::minAreaRect(points2);
+
+		cv::Point2f points[4];
+		rect.points(points);
+		samples.push_back({Vec2(rect.center.x, rect.center.y), rect.angle});
+
+		//for (int i = 0; i < 4; i++)
+			//cv::line(mat, points[i], points[(i + 1) % 4], cv::Vec3b(255, 0, 0));
+	}
+}
+
+/*void process(cv::Mat& mat)
 {
 	cv::Mat m;
 
 	cv::inRange(mat, cv::Vec3b(0, 0, 190), cv::Vec3b(170, 170, 255), m);
 
-	/*for (int y = 0; y < m.rows; y++)
+	for (int y = 0; y < m.rows; y++)
 	{
 		for (int x = 0; x < m.cols; x++)
 		{
 			unsigned char c = m.ptr<unsigned char>(y)[x];
-      if(c)
-			mat.ptr<Color>(y)[x] = {c, c, c};
+			if (c)
+				mat.ptr<Color>(y)[x] = {c, c, c};
 		}
-	}*/
+	}
 
 	Vec2 rectPos = {-1, -1};
 
@@ -125,12 +214,11 @@ void process(cv::Mat& mat)
 
 	if (rectPos.x == -1 && rectPos.y == -1)
 	{
-		std::cout << "cant find rectangle";
 		return;
 	}
 
 	Vec2 offsets[] = {{-1, 0}, {-1, 1}, {0, 1}};
-	Vec2 curPos = traceLine(m, rectPos, offsets, 3, false);
+	Vec2 curPos = traceLine(m, rectPos, offsets, 3, 4);
 
 	Vec2 offsets2[] = {{0, 1}, {1, 1}, {1, 0}};
 	Vec2 curPos2 = traceLine(m, curPos, offsets2, 3, false);
@@ -147,11 +235,11 @@ void process(cv::Mat& mat)
 	cv::line(mat, cv::Point(curPos2.x, curPos2.y), cv::Point(point4.x, point4.y), rectColor);
 	cv::line(mat, cv::Point(rectPos.x, rectPos.y), cv::Point(point4.x, point4.y), rectColor);
 
-	//std::cout << midpoint.x << ", " << midpoint.y << '\n';
+	// std::cout << midpoint.x << ", " << midpoint.y << '\n';
 
-	//std::vector<cv::Point> points = {rectPos, curPos, curPos2, point4};
+	// std::vector<cv::Point> points = {rectPos, curPos, curPos2, point4};
 
-	//cv::fillPoly(mat, cv::InputArrayOfArrays(points), rectColor);
+	// cv::fillPoly(mat, cv::InputArrayOfArrays(points), rectColor);
 
 	cv::circle(mat, cv::Point(midpoint.x, midpoint.y), 5, cv::Vec3b(0, 255, 0));
-}
+}*/
