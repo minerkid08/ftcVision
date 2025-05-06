@@ -1,245 +1,373 @@
+#include "opencv2/core.hpp"
+#include "opencv2/core/matx.hpp"
+#include "opencv2/core/types.hpp"
+#include "opencv2/imgcodecs.hpp"
+#include "opencv2/imgproc.hpp"
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <opencv2/opencv.hpp>
+#include <sstream>
 
-struct Vec2
-{
-	int x;
-	int y;
+#define linesPerElem 6
 
-	Vec2(){};
-	Vec2(int _x, int _y)
-	{
-		x = _x;
-		y = _y;
-	}
-
-	Vec2 operator+(const Vec2& other)
-	{
-		return {x + other.x, y + other.y};
-	}
-
-	bool operator==(const Vec2& other)
-	{
-		return other.x == x && other.y == y;
-	}
-
-	operator const cv::Point() const
-	{
-		return cv::Point(x, y);
-	}
-
-	static Vec2 midpoint(const Vec2& a, const Vec2& b)
-	{
-		return {(a.x + b.x) / 2, (a.y + b.y) / 2};
-	}
-};
-
-struct Sample
-{
-	Vec2 pos;
-	float rot;
-};
-
-std::vector<Sample> samples;
+// #define IMG
+// #define CROP_VIEW
 
 struct Color
 {
-	unsigned char b;
-	unsigned char g;
 	unsigned char r;
-
-	cv::Vec3b vec() const
-	{
-		return {b, g, r};
-	}
+	unsigned char g;
+	unsigned char b;
 };
 
-struct SampleDetection
+struct ColorRange
 {
 	Color low;
-	Color hight;
+	Color high;
+	char hasLow2;
+	Color low2;
+	Color high2;
 };
 
-SampleDetection redSampleDetection = {{0, 0, 180}, {160, 120, 255}};
-SampleDetection blueSampleDetection = {{130, 0, 0}, {255, 120, 110}};
-SampleDetection yellowSampleDetection = {{0, 120, 180}, {160, 255, 255}};
+cv::Vec3b Color_vec(const Color* c)
+{
+	return {c->r, c->g, c->b};
+}
 
-void process(cv::Mat& mat, const SampleDetection& detection);
+ColorRange redRange = {
+	.low = {160, 150, 20},
+	.high = {180, 255, 255},
+	.hasLow2 = 1,
+	.low2 = {0, 150, 20},
+	.high2 = {20, 255, 255},
+};
+
+ColorRange blueRange = {
+	.low = {0, 50, 50},
+	.high = {80, 255, 255},
+	.hasLow2 = 0,
+};
+
+ColorRange blueRange2 = {
+	.low = {128, 20, 20},
+	.high = {198, 255, 255},
+	.hasLow2 = 0,
+};
+
+int i2 = 0;
+float focalLength = 0.0f;
+
+cv::Mat process(const cv::Mat& inMat)
+{
+	cv::Mat mat;
+	ColorRange* range = &blueRange;
+	cv::cvtColor(inMat, mat, cv::COLOR_RGB2HSV);
+
+	int width = mat.size().width;
+	int height = mat.size().height;
+
+#ifdef CROP_VIEW
+
+	cv::Rect r;
+	r.x = 0;
+	r.y = 0;
+	r.width = width / 2;
+	r.height = height / 2;
+
+	width = width / 2;
+	height = height / 2;
+
+	cv::Mat m = (*mat)(r);
+#else
+	cv::Mat m = mat;
+#endif
+
+	cv::Mat m2;
+
+	cv::inRange(m, Color_vec(&range->low), Color_vec(&range->high), m2);
+	if (range->hasLow2)
+	{
+		cv::Mat m3;
+		cv::inRange(m, Color_vec(&range->low2), Color_vec(&range->high2), m3);
+		cv::add(m3, m2, m2);
+	}
+
+	std::vector<std::vector<cv::Point>> countors;
+
+	cv::findContours(m2, countors, cv::RetrievalModes::RETR_LIST, cv::ContourApproximationModes::CHAIN_APPROX_NONE);
+
+	if (countors.size() == 0)
+		return mat;
+
+	int elemCount = 0;
+	cv::cvtColor(m, m, cv::COLOR_HSV2RGB);
+	cv::line(m, {0, height / 2}, {width, height / 2}, cv::Vec3b(0, 255, 0));
+	cv::line(m, {width / 2, 0}, {width / 2, height}, cv::Vec3b(0, 255, 0));
+	for (const std::vector<cv::Point>& countor : countors)
+	{
+		cv::RotatedRect rect = cv::minAreaRect(countor);
+
+		if (rect.size.height < 40)
+			continue;
+		if (rect.size.width < 40)
+			continue;
+
+		float rectWidth;
+		float rectHeight;
+		if (rect.size.width > rect.size.height)
+		{
+			rectWidth = rect.size.height;
+			rectHeight = rect.size.width;
+		}
+		else
+		{
+			rectWidth = rect.size.width;
+			rectHeight = rect.size.height;
+		}
+
+		elemCount++;
+		cv::Point2f points[4];
+		rect.points(points);
+		cv::Point2f aabb[4];
+
+		cv::circle(m, rect.center, 10, {0, 255, 0});
+
+		float minX = rect.center.x;
+		float maxX = rect.center.x;
+		float minY = rect.center.y;
+		float maxY = rect.center.y;
+
+		for (const cv::Point& point : countor)
+		{
+			minX = __min(point.x, minX);
+			maxX = __max(point.x, maxX);
+			minY = __min(point.y, minY);
+			maxY = __max(point.y, maxY);
+		}
+
+		aabb[0].x = minX;
+		aabb[0].y = minY;
+		aabb[1].x = minX;
+		aabb[1].y = maxY;
+		aabb[2].x = maxX;
+		aabb[2].y = maxY;
+		aabb[3].x = maxX;
+		aabb[3].y = minY;
+
+		float aabbX = (minX + maxX) / 2;
+		float aabbY = (minY + maxY) / 2;
+		float aabbW = maxX - minX;
+		float aabbH = maxY - minY;
+
+		printf("element %d\n", elemCount);
+		printf("rotated rect: x: %.2f, y: %.2f, w: %.2f, h: %.2f, r: %.2f\n", rect.center.x, rect.center.y,
+			   rectWidth, rectHeight, rect.angle);
+		printf("aabb: x: %.2f, y: %.2f, w: %.2f, h: %.2f\n", aabbX, aabbY, aabbW, aabbH);
+		printf("xoff: %.2f, yoff: %.2f\n", rect.center.x - (width / 2.0f), rect.center.y - (height / 2.0f));
+		float distx = (1.5f * focalLength) / rectWidth;
+		float inPerPx = 1.5f / rectWidth;
+		float disty = inPerPx * (rect.center.x - (width / 2.0f));
+		printf("x dist: %.2f\n", distx);
+		printf("y dist: %.2f\n", disty);
+
+		for (int i = 0; i < 4; i++)
+		{
+			cv::line(m, points[i], points[i == 3 ? 0 : i + 1], cv::Vec3b(255, 0, 0));
+			cv::line(m, aabb[i], aabb[i == 3 ? 0 : i + 1], cv::Vec3b(0, 0, 255));
+		}
+	}
+	if (elemCount < i2)
+	{
+		int c = i2 - elemCount;
+		for (int i = 0; i < c * linesPerElem; i++)
+		{
+			printf("\033[2K\033[1B");
+		}
+		printf("\033[%dA", c * linesPerElem);
+	}
+	if (elemCount > 0)
+		printf("\033[%dA", elemCount * linesPerElem);
+	i2 = elemCount;
+	return m;
+}
+
+void calibrate()
+{
+	printf("calibrating\n");
+
+	std::vector<float> distances;
+	{
+		std::ifstream distFile("calib/calibDistances.txt");
+		std::stringstream sstream;
+		sstream << distFile.rdbuf();
+		char buf[12];
+		int ind = 0;
+		std::string s = sstream.str();
+		for (char c : s)
+		{
+			if (c == '\r')
+				continue;
+			if (c == '\n')
+			{
+				buf[ind] = 0;
+				float n = std::atof(buf);
+				distances.push_back(n);
+				ind = 0;
+				continue;
+			}
+			buf[ind++] = c;
+		}
+		buf[ind] = 0;
+		float n = std::atof(buf);
+		distances.push_back(n);
+	}
+	printf("calib distances loaded, %d numbers\n", distances.size());
+
+	std::vector<float> focalLengths;
+
+	int i = 0;
+	for (std::filesystem::path p : std::filesystem::directory_iterator("calib"))
+	{
+		if (p.extension() != ".jpg")
+			continue;
+		cv::Mat mat = cv::imread(p.string().c_str(), cv::IMREAD_COLOR);
+		if (mat.data == nullptr)
+		{
+			printf("error: unable to read calib image. \"%s\"\n", p.string().c_str());
+			fflush(stdout);
+			exit(1);
+		}
+		ColorRange* range = &blueRange;
+		cv::cvtColor(mat, mat, cv::COLOR_RGB2HSV);
+
+		cv::Mat m = mat;
+
+		cv::Mat m2;
+
+		cv::inRange(m, Color_vec(&range->low), Color_vec(&range->high), m2);
+		if (range->hasLow2)
+		{
+			cv::Mat m3;
+			cv::inRange(m, Color_vec(&range->low2), Color_vec(&range->high2), m3);
+			cv::add(m3, m2, m2);
+		}
+
+		std::vector<std::vector<cv::Point>> countors;
+
+		cv::findContours(m2, countors, cv::RetrievalModes::RETR_LIST, cv::ContourApproximationModes::CHAIN_APPROX_NONE);
+
+		if (countors.size() == 0)
+		{
+			printf("error: no elements found in calib image\n");
+			fflush(stdout);
+			exit(1);
+		}
+
+		bool bk = false;
+		for (const std::vector<cv::Point>& countor : countors)
+		{
+			cv::RotatedRect rect = cv::minAreaRect(countor);
+
+			if (rect.size.height < 40)
+				continue;
+			if (rect.size.width < 40)
+				continue;
+
+			float rectWidth;
+			float rectHeight;
+			if (rect.size.width > rect.size.height)
+			{
+				rectWidth = rect.size.height;
+				rectHeight = rect.size.width;
+			}
+			else
+			{
+				rectWidth = rect.size.width;
+				rectHeight = rect.size.height;
+			}
+
+			float dist = distances[i++];
+			float width = 1.5f;
+
+			focalLengths.push_back((rectWidth * dist) / width);
+
+			bk = true;
+			break;
+		}
+		if (bk)
+			continue;
+		printf("error: no valid elements found in calib image\n");
+		fflush(stdout);
+		exit(1);
+	}
+	printf("processed %d images\n", i);
+	float sum = 0;
+	for (float f : focalLengths)
+		sum += f;
+	focalLength = sum / focalLengths.size();
+	printf("focal length %.2f\n", focalLength);
+	printf("done\n");
+}
 
 int main(int argc, const char** argv)
 {
-	cv::Mat mat; // = cv::imread("image2.jpg", cv::IMREAD_COLOR);
+	printf("\033[2J\033[H\033[8m");
+	calibrate();
+#ifdef IMG
+	cv::Mat mat = cv::imread("image3.png", cv::IMREAD_COLOR);
+	printf("start width %i, height %i\n", mat.size().width, mat.size().height);
+	process(&mat);
+#else
+	cv::Mat mat;
 
 	cv::VideoCapture c(1, cv::CAP_DSHOW);
 
 	if (!c.isOpened())
 	{
-		std::cerr << "cant open camera";
-		return 0;
+		printf("error: cant open camera\n");
+		fflush(stdout);
+		return 1;
 	}
 
+	printf("opened webcam\n");
+
 	c.read(mat);
+#endif
+	printf("width %i, height %i\n", mat.size().width, mat.size().height);
 
-	std::cout << cv::format("width %i, height %i\n", mat.size().width, mat.size().height);
+	printf("----recognition data----\n");
 
-	std::cout << "opened webcam\n";
+	cv::Mat mat2;
 
 	while (true)
 	{
+#ifndef IMG
 		if (!c.read(mat))
 			break;
-		process(mat, yellowSampleDetection);
+		mat2 = process(mat);
+#endif
 
-		cv::imshow("window", mat);
+		cv::imshow("window", mat2);
 		if (cv::waitKey(1) == 'q')
 			break;
 	}
 
-  cv::imwrite("out.jpg", mat);
+	printf("\033[%dB", linesPerElem * i2);
+	printf("----end recognition data----\n");
+	if (!cv::imwrite("out.jpg", mat2))
+	{
+		printf("error: failed to write mat to file \"out.jpg\"\n");
+		fflush(stdout);
+		return 1;
+	}
+
+	if (!cv::imwrite("outNoOverlay.jpg", mat))
+	{
+		printf("error: failed to write mat to file \"outNoOverlay.jpg\"\n");
+		fflush(stdout);
+		return 1;
+	}
 
 	return 0;
 }
-
-inline bool checkPixel(const cv::Mat& mat, Vec2 pos, Vec2 offset = {0, 0})
-{
-	return mat.ptr<unsigned char>(pos.y + offset.y)[pos.x + offset.x];
-}
-
-Vec2 traceLine(const cv::Mat& m, Vec2 curPos, const Vec2* offsets, int len, int strictTracingLimit = -1)
-{
-	char e = (strictTracingLimit ? -1 : -2);
-	int traceCount = 0;
-	while (true)
-	{
-		bool set = false;
-		for (int i = 0; i < len; i++)
-		{
-			if (e == i)
-			{
-				if (traceCount > strictTracingLimit)
-					break;
-				traceCount++;
-			}
-			else
-				traceCount = 0;
-			if (checkPixel(m, curPos, offsets[i]))
-			{
-				if (i == 0 && e == -1)
-					e = 2;
-				if (i == 2 && e == -1)
-					e = 0;
-				set = true;
-				curPos.x += offsets[i].x;
-				curPos.y += offsets[i].y;
-				break;
-			}
-		}
-		if (!set)
-			break;
-	}
-	return curPos;
-}
-
-void process(cv::Mat& mat, const SampleDetection& detection)
-{
-	cv::Mat m;
-
-	cv::inRange(mat, detection.low.vec(), detection.hight.vec(), m);
-
-	for (int y = 0; y < m.rows; y++)
-	{
-		for (int x = 0; x < m.cols; x++)
-		{
-			unsigned char c = m.ptr<unsigned char>(y)[x];
-			if (c)
-				mat.ptr<Color>(y)[x] = {c, c, c};
-		}
-	}
-
-	std::vector<std::vector<cv::Point>> countors;
-
-	cv::findContours(m, countors, cv::RetrievalModes::RETR_LIST, cv::ContourApproximationModes::CHAIN_APPROX_NONE);
-
-	if (countors.size() == 0)
-		return;
-
-	samples.clear();
-
-	for (const std::vector<cv::Point>& points2 : countors)
-	{
-		cv::RotatedRect rect = cv::minAreaRect(points2);
-
-		cv::Point2f points[4];
-		rect.points(points);
-		samples.push_back({Vec2(rect.center.x, rect.center.y), rect.angle});
-
-		//for (int i = 0; i < 4; i++)
-			//cv::line(mat, points[i], points[(i + 1) % 4], cv::Vec3b(255, 0, 0));
-	}
-}
-
-/*void process(cv::Mat& mat)
-{
-	cv::Mat m;
-
-	cv::inRange(mat, cv::Vec3b(0, 0, 190), cv::Vec3b(170, 170, 255), m);
-
-	for (int y = 0; y < m.rows; y++)
-	{
-		for (int x = 0; x < m.cols; x++)
-		{
-			unsigned char c = m.ptr<unsigned char>(y)[x];
-			if (c)
-				mat.ptr<Color>(y)[x] = {c, c, c};
-		}
-	}
-
-	Vec2 rectPos = {-1, -1};
-
-	for (int y = 0; y < m.rows; y++)
-	{
-		bool bk = false;
-		for (int x = 0; x < m.cols; x++)
-		{
-			if (checkPixel(m, {x, y}))
-			{
-				rectPos.x = x;
-				rectPos.y = y;
-				bk = true;
-				break;
-			}
-		}
-		if (bk)
-			break;
-	}
-
-	if (rectPos.x == -1 && rectPos.y == -1)
-	{
-		return;
-	}
-
-	Vec2 offsets[] = {{-1, 0}, {-1, 1}, {0, 1}};
-	Vec2 curPos = traceLine(m, rectPos, offsets, 3, 4);
-
-	Vec2 offsets2[] = {{0, 1}, {1, 1}, {1, 0}};
-	Vec2 curPos2 = traceLine(m, curPos, offsets2, 3, false);
-
-	// unsigned char rectColor = 128;
-	cv::Vec3b rectColor(255, 0, 0);
-
-	cv::line(mat, cv::Point(curPos.x, curPos.y), cv::Point(rectPos.x, rectPos.y), rectColor);
-	cv::line(mat, cv::Point(curPos2.x, curPos2.y), cv::Point(curPos.x, curPos.y), rectColor);
-
-	Vec2 midpoint = Vec2::midpoint(rectPos, curPos2);
-
-	Vec2 point4(midpoint.x * 2 - curPos.x, midpoint.y * 2 - curPos.y);
-	cv::line(mat, cv::Point(curPos2.x, curPos2.y), cv::Point(point4.x, point4.y), rectColor);
-	cv::line(mat, cv::Point(rectPos.x, rectPos.y), cv::Point(point4.x, point4.y), rectColor);
-
-	// std::cout << midpoint.x << ", " << midpoint.y << '\n';
-
-	// std::vector<cv::Point> points = {rectPos, curPos, curPos2, point4};
-
-	// cv::fillPoly(mat, cv::InputArrayOfArrays(points), rectColor);
-
-	cv::circle(mat, cv::Point(midpoint.x, midpoint.y), 5, cv::Vec3b(0, 255, 0));
-}*/
